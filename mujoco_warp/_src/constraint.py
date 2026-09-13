@@ -2642,7 +2642,8 @@ def _efc_contact_init(cone_type: types.ConeType, is_sparse: bool, newton: bool):
   IS_ELLIPTIC = cone_type == types.ConeType.ELLIPTIC
   IS_SPARSE = is_sparse
 
-  @wp.kernel(module="unique", enable_backward=False)
+  # Each counter is incremented at most once per contact, regardless of constraint capacity.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": 0})
   def kernel(
     # Model:
     body_weldid: wp.array[int],
@@ -2756,7 +2757,8 @@ def _efc_contact_init_flex(cone_type: types.ConeType, is_sparse: bool, newton: b
   IS_SPARSE = is_sparse
   HAS_FLEX = True
 
-  @wp.kernel(module="unique", enable_backward=False)
+  # Each counter is incremented at most once per contact, regardless of constraint capacity.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": 0})
   def kernel(
     # Model:
     body_parentid: wp.array[int],
