@@ -1795,10 +1795,11 @@ def _zero_qfrc_constraint_sparse(
 
 
 @cache_kernel
-def _update_constraint_init_qfrc_constraint_sparse(compact: bool):
+def _update_constraint_init_qfrc_constraint_sparse(compact: bool, nv: int):
   COMPACT = compact
 
-  @wp.kernel(module="unique", enable_backward=False)
+  # One thread visits one constraint row, with at most nv nonzero columns.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": max(1, nv)})
   def kernel(
     # Data in:
     nefc_in: wp.array[int],
@@ -2054,7 +2055,7 @@ def _update_constraint(
       outputs=[d.qfrc_constraint],
     )
     wp.launch(
-      _update_constraint_init_qfrc_constraint_sparse(sc),
+      _update_constraint_init_qfrc_constraint_sparse(sc, m.nv),
       dim=(d.nworld, d.njmax),
       inputs=[d.nefc, dj.efc.J_rownnz, dj.efc.J_rowadr, dj.efc.J_colind, dj.efc.J, d.efc.force, dj.dof_cdof, changed, ctx.done],
       outputs=[d.qfrc_constraint],
@@ -3100,10 +3101,11 @@ _JTDAJ_OVERSUBSCRIBE_WAVES = 6  # grid-stride depth; short per-warp chains load-
 
 
 @cache_kernel
-def _JTDAJ_sparse(compact: bool):
+def _JTDAJ_sparse(compact: bool, max_records: int | None = None):
   COMPACT = compact
+  options = {} if max_records is None else {"deterministic_max_records": max_records}
 
-  @wp.kernel(module="unique", enable_backward=False)
+  @wp.kernel(module="unique", enable_backward=False, module_options=options)
   def kernel(
     # Data in:
     efc_jtdaj_adr_in: wp.array2d[int],
@@ -3154,6 +3156,15 @@ def _JTDAJ_sparse(compact: bool):
           wp.atomic_add(h_out[worldid, wp.min(dof_row, dof_col)], wp.max(dof_row, dof_col), hval)
 
   return kernel
+
+
+def _jtdaj_max_records(njmax: int, nv: int, groups_per_world: int) -> int:
+  # Every group contains at least one constraint row. Each lane emits at most
+  # ceil(triangle(nv) / warp_size) records per group, including grid-stride visits.
+  groups_per_thread = (njmax + groups_per_world - 1) // groups_per_world
+  entries = nv * (nv + 1) // 2
+  entries_per_lane = (entries + _JTDAJ_THREADS_PER_GROUP - 1) // _JTDAJ_THREADS_PER_GROUP
+  return max(1, groups_per_thread * entries_per_lane)
 
 
 def _jtdaj_groups_per_world(nworld: int, njmax: int) -> int:
@@ -3302,7 +3313,7 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
 
       groups_per_world = _jtdaj_groups_per_world(d.nworld, d.njmax)
       wp.launch(
-        _JTDAJ_sparse(sc),
+        _JTDAJ_sparse(sc, _jtdaj_max_records(d.njmax, mj.nv, groups_per_world)),
         dim=(d.nworld, groups_per_world, _JTDAJ_THREADS_PER_GROUP),
         inputs=[
           dj.efc.jtdaj_adr,

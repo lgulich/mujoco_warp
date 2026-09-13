@@ -1299,7 +1299,8 @@ _PRIMITIVE_COLLISIONS = {
 
 @cache_kernel
 def _primitive_narrowphase(primitive_collisions_types, primitive_collisions_func):
-  @wp.kernel(module="unique", enable_backward=False)
+  # A thread dispatches one pair type; its wrapper writes at most eight contacts.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": 8})
   def primitive_narrowphase(
     # Model:
     geom_type: wp.array[int],
