@@ -2760,106 +2760,111 @@ def _elliptic_hessian_entry_from_projections(
   )
 
 
-@wp.kernel
-def _update_gradient_JTCJ_dense(
-  # Model:
-  opt_impratio_invsqrt: wp.array[float],
-  dof_tri_row: wp.array[int],
-  dof_tri_col: wp.array[int],
-  # Data in:
-  contact_dist_in: wp.array[float],
-  contact_includemargin_in: wp.array[float],
-  contact_friction_in: wp.array[types.vec5],
-  contact_dim_in: wp.array[int],
-  contact_efc_address_in: wp.array2d[int],
-  contact_worldid_in: wp.array[int],
-  efc_J_in: wp.array3d[float],
-  efc_D_in: wp.array2d[float],
-  efc_state_in: wp.array2d[int],
-  naconmax_in: int,
-  nacon_in: wp.array[int],
-  # In:
-  ctx_Jaref_in: wp.array2d[float],
-  ctx_done_in: wp.array[bool],
-  nblocks_perblock: int,
-  dim_block: int,
-  # Out:
-  ctx_h_out: wp.array3d[float],
-):
-  conid_start, elementid = wp.tid()
+@cache_kernel
+def _update_gradient_JTCJ_dense(max_records: int):
+  # Each grid-stride iteration can emit one Hessian scatter record.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": max_records})
+  def kernel(
+    # Model:
+    opt_impratio_invsqrt: wp.array[float],
+    dof_tri_row: wp.array[int],
+    dof_tri_col: wp.array[int],
+    # Data in:
+    contact_dist_in: wp.array[float],
+    contact_includemargin_in: wp.array[float],
+    contact_friction_in: wp.array[types.vec5],
+    contact_dim_in: wp.array[int],
+    contact_efc_address_in: wp.array2d[int],
+    contact_worldid_in: wp.array[int],
+    efc_J_in: wp.array3d[float],
+    efc_D_in: wp.array2d[float],
+    efc_state_in: wp.array2d[int],
+    naconmax_in: int,
+    nacon_in: wp.array[int],
+    # In:
+    ctx_Jaref_in: wp.array2d[float],
+    ctx_done_in: wp.array[bool],
+    nblocks_perblock: int,
+    dim_block: int,
+    # Out:
+    ctx_h_out: wp.array3d[float],
+  ):
+    conid_start, elementid = wp.tid()
 
-  dof1id = dof_tri_row[elementid]
-  dof2id = dof_tri_col[elementid]
+    dof1id = dof_tri_row[elementid]
+    dof2id = dof_tri_col[elementid]
 
-  for i in range(nblocks_perblock):
-    conid = conid_start + i * dim_block
+    for i in range(nblocks_perblock):
+      conid = conid_start + i * dim_block
 
-    if conid >= min(nacon_in[0], naconmax_in):
-      return
+      if conid >= min(nacon_in[0], naconmax_in):
+        return
 
-    worldid = contact_worldid_in[conid]
-    if ctx_done_in[worldid]:
-      continue
+      worldid = contact_worldid_in[conid]
+      if ctx_done_in[worldid]:
+        continue
 
-    condim = contact_dim_in[conid]
+      condim = contact_dim_in[conid]
 
-    if condim == 1:
-      continue
+      if condim == 1:
+        continue
 
-    # check contact status
-    if contact_dist_in[conid] - contact_includemargin_in[conid] >= 0.0:
-      continue
+      # check contact status
+      if contact_dist_in[conid] - contact_includemargin_in[conid] >= 0.0:
+        continue
 
-    efcid0 = contact_efc_address_in[conid, 0]
-    if efcid0 < 0:
-      continue
-    if efc_state_in[worldid, efcid0] != types.ConstraintState.CONE:
-      continue
+      efcid0 = contact_efc_address_in[conid, 0]
+      if efcid0 < 0:
+        continue
+      if efc_state_in[worldid, efcid0] != types.ConstraintState.CONE:
+        continue
 
-    fri = contact_friction_in[conid]
-    mu = fri[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
+      fri = contact_friction_in[conid]
+      mu = fri[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
 
-    mu2 = mu * mu
-    dm = math.safe_div(efc_D_in[worldid, efcid0], mu2 * (1.0 + mu2))
+      mu2 = mu * mu
+      dm = math.safe_div(efc_D_in[worldid, efcid0], mu2 * (1.0 + mu2))
 
-    if dm == 0.0:
-      continue
+      if dm == 0.0:
+        continue
 
-    n = ctx_Jaref_in[worldid, efcid0] * mu
-    z01 = mu * efc_J_in[worldid, efcid0, dof1id]
-    z02 = mu * efc_J_in[worldid, efcid0, dof2id]
-    tt = float(0.0)
-    projection1 = float(0.0)
-    projection2 = float(0.0)
-    tangent_dot = float(0.0)
-    for dim in range(1, condim):
-      efcid = contact_efc_address_in[conid, dim]
-      if efcid >= 0:
-        scale = fri[dim - 1]
-        u = ctx_Jaref_in[worldid, efcid] * scale
-        z1 = scale * efc_J_in[worldid, efcid, dof1id]
-        z2 = scale * efc_J_in[worldid, efcid, dof2id]
-        tt += u * u
-        projection1 += u * z1
-        projection2 += u * z2
-        tangent_dot += z1 * z2
+      n = ctx_Jaref_in[worldid, efcid0] * mu
+      z01 = mu * efc_J_in[worldid, efcid0, dof1id]
+      z02 = mu * efc_J_in[worldid, efcid0, dof2id]
+      tt = float(0.0)
+      projection1 = float(0.0)
+      projection2 = float(0.0)
+      tangent_dot = float(0.0)
+      for dim in range(1, condim):
+        efcid = contact_efc_address_in[conid, dim]
+        if efcid >= 0:
+          scale = fri[dim - 1]
+          u = ctx_Jaref_in[worldid, efcid] * scale
+          z1 = scale * efc_J_in[worldid, efcid, dof1id]
+          z2 = scale * efc_J_in[worldid, efcid, dof2id]
+          tt += u * u
+          projection1 += u * z1
+          projection2 += u * z2
+          tangent_dot += z1 * z2
 
-    t = wp.max(wp.sqrt(tt), types.MJ_MINVAL)
-    ttt = wp.max(t * t * t, types.MJ_MINVAL)
-    mu_tinv = math.safe_div(mu, t)
-    h = _elliptic_hessian_entry_from_projections(
-      dm,
-      mu_tinv,
-      mu * math.safe_div(n, ttt),
-      mu2 - n * mu_tinv,
-      z01,
-      z02,
-      projection1,
-      projection2,
-      tangent_dot,
-    )
+      t = wp.max(wp.sqrt(tt), types.MJ_MINVAL)
+      ttt = wp.max(t * t * t, types.MJ_MINVAL)
+      mu_tinv = math.safe_div(mu, t)
+      h = _elliptic_hessian_entry_from_projections(
+        dm,
+        mu_tinv,
+        mu * math.safe_div(n, ttt),
+        mu2 - n * mu_tinv,
+        z01,
+        z02,
+        projection1,
+        projection2,
+        tangent_dot,
+      )
 
-    ctx_h_out[worldid, dof1id, dof2id] += h
+      ctx_h_out[worldid, dof1id, dof2id] += h
+
+  return kernel
 
 
 @cache_kernel
@@ -3458,7 +3463,7 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
           )
         else:
           wp.launch(
-            _update_gradient_JTCJ_dense,
+            _update_gradient_JTCJ_dense(nblocks_perblock),
             dim=(dim_block, m.dof_tri_row.size),
             inputs=[
               m.opt.impratio_invsqrt,

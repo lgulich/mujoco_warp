@@ -31,6 +31,52 @@ from mujoco_warp._src import warp_util
 
 
 class SparseScatterTest(parameterized.TestCase):
+  @parameterized.parameters(1, 2, 8193)
+  def test_dense_hessian_grid_stride(self, stride):
+    if not hasattr(wp, "DeterministicMode") or not wp.is_cuda_available():
+      self.skipTest("Requires Warp determinism and CUDA")
+    self._with_determinism(lambda: self._check_dense_grid_stride(stride))
+
+  def _check_dense_grid_stride(self, stride):
+    ncon = 8193
+    with wp.ScopedDevice("cuda:0"):
+
+      def floats(values):
+        return wp.array(np.asarray(values, dtype=np.float32), dtype=float)
+
+      def ints(values):
+        return wp.array(np.asarray(values, dtype=np.int32), dtype=int)
+
+      h = wp.zeros((1, 1, 1), dtype=float)
+      blocks = (ncon + stride - 1) // stride
+      wp.launch(
+        solver._update_gradient_JTCJ_dense(blocks),
+        dim=(stride, 1),
+        inputs=[
+          floats([1]),
+          ints([0]),
+          ints([0]),
+          floats([-1] * ncon),
+          floats([0] * ncon),
+          wp.array(np.ones((ncon, 5), dtype=np.float32), dtype=types.vec5),
+          ints([3] * ncon),
+          ints([[0, 1, 2, -1, -1, -1]] * ncon),
+          ints([0] * ncon),
+          floats([[[1], [0], [1]]]),
+          floats([[1, 1, 1]]),
+          ints([[int(types.ConstraintState.CONE)] * 3]),
+          ncon,
+          ints([ncon]),
+          floats([[0, 1, 0]]),
+          wp.array([False], dtype=bool),
+          blocks,
+          stride,
+        ],
+        outputs=[h],
+      )
+      # Each active cone contributes one to this Hessian entry.
+      np.testing.assert_array_equal(h.numpy(), [[[float(ncon)]]])
+
   @parameterized.parameters(
     (1, 8192, 8192, 33, False),
     *((worlds, 17, 3, 33, compact) for worlds in (1, 2, 5) for compact in (False, True)),
