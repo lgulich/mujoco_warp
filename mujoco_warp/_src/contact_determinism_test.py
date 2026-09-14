@@ -15,6 +15,8 @@
 
 """Regression tests for deterministic contact allocation."""
 
+from unittest import mock
+
 import mujoco
 import numpy as np
 import warp as wp
@@ -22,8 +24,10 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 import mujoco_warp as mjw
+from mujoco_warp._src import collision_driver
 from mujoco_warp._src import constraint
 from mujoco_warp._src import warp_util
+from mujoco_warp._src.collision_core import create_collision_context
 
 
 class ContactDeterminismTest(parameterized.TestCase):
@@ -45,6 +49,58 @@ class ContactDeterminismTest(parameterized.TestCase):
       self.assertEqual(kernel.module.options["deterministic"], wp.DeterministicMode.RUN_TO_RUN)
       dynamic_kernel = constraint._efc_contact_jac_dense(32, mjw.ConeType.ELLIPTIC)
       self.assertEqual(dynamic_kernel.module.options["deterministic_max_records"], 32768)
+    finally:
+      wp.config.deterministic = original_mode
+      wp.config.deterministic_max_records = original_records
+      warp_util._KERNEL_CACHE.clear()
+      warp_util._KERNEL_CACHE.update(saved_cache)
+
+  @parameterized.parameters(1, 2, 5)
+  def test_nxn_record_capacity_and_pairs_with_large_record_default(self, nworld):
+    """One candidate thread needs one record, independent of the solver's constraint budget."""
+    if not hasattr(wp, "DeterministicMode") or not wp.is_cuda_available():
+      self.skipTest("Requires Warp determinism and CUDA")
+    from warp._src import deterministic
+
+    model = mujoco.MjModel.from_xml_string("""
+      <mujoco>
+        <worldbody>
+          <body><freejoint/><geom type="sphere" size=".1"/></body>
+          <body pos=".15 0 0"><freejoint/><geom type="sphere" size=".1"/></body>
+          <body pos="3 0 0"><freejoint/><geom type="sphere" size=".1"/></body>
+        </worldbody>
+      </mujoco>
+    """)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    original_mode = wp.config.deterministic
+    original_records = wp.config.deterministic_max_records
+    saved_cache = warp_util._KERNEL_CACHE.copy()
+    allocate = deterministic.allocate_counter_buffers
+    capacities = []
+
+    def record_capacity(*args, **kwargs):
+      buffers = allocate(*args, **kwargs)
+      capacities.extend(buffer[6] for buffer in buffers)
+      return buffers
+
+    try:
+      with wp.ScopedDevice("cuda:0"):
+        m = mjw.put_model(model)
+        d = mjw.put_data(model, data, nworld=nworld, nconmax=16, njmax=8192)
+        ctx = create_collision_context(d.naconmax)
+        wp.config.deterministic = wp.DeterministicMode.RUN_TO_RUN
+        wp.config.deterministic_max_records = 8192
+        warp_util._KERNEL_CACHE.clear()
+        with mock.patch.object(deterministic, "allocate_counter_buffers", side_effect=record_capacity):
+          for _ in range(2):
+            d.ncollision.zero_()
+            collision_driver.nxn_broadphase(m, d, ctx)
+            self.assertEqual(d.ncollision.numpy()[0], nworld)
+            np.testing.assert_array_equal(ctx.collision_pair.numpy()[:nworld], [[0, 1]] * nworld)
+            np.testing.assert_array_equal(ctx.collision_worldid.numpy()[:nworld], np.arange(nworld))
+        self.assertTrue(capacities)
+        self.assertEqual(set(capacities), {nworld * m.nxn_geom_pair_filtered.shape[0]})
     finally:
       wp.config.deterministic = original_mode
       wp.config.deterministic_max_records = original_records

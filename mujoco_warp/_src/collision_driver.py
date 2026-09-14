@@ -691,7 +691,8 @@ def _nxn_broadphase(
   enable_sleep: bool = False,
   incremental: bool = False,
 ):
-  @wp.kernel(module="unique", enable_backward=False)
+  # Each candidate pair increments the counter at most once, regardless of solver capacity.
+  @wp.kernel(module="unique", enable_backward=False, module_options={"deterministic_max_records": 0})
   def kernel(
     # Model:
     geom_type: wp.array[int],
